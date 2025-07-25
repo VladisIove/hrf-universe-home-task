@@ -1,12 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import (
-    Column,
-    Integer,
-    String,
-    Table,
-)
+from sqlalchemy import Column, Integer, String, Table, Float
 from sqlalchemy.orm import registry
 
 mapper_registry = registry()
@@ -67,3 +62,28 @@ class JobPosting(Model):
     standard_job_id: str
     country_code: Optional[str] = None
     days_to_hire: Optional[int] = None
+
+
+@mapper_registry.mapped
+@dataclass
+class DaysToHire(Model):
+    __table__ = Table(
+        "days_to_hire",
+        mapper_registry.metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("standard_job_id", String, nullable=False),
+        Column("country_code", String, nullable=True),
+        Column("min_days", Float, nullable=False),
+        Column("avg_days", Float, nullable=False),
+        Column("max_days", Float, nullable=False),
+        Column("job_postings_number", Integer, nullable=False),
+        schema="public",
+    )
+
+    standard_job_id: str
+    country_code: str
+    min_days: float
+    avg_days: float
+    max_days: float
+    job_postings_number: int
+    country_code: str | None
