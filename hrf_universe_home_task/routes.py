@@ -9,7 +9,7 @@ from hrf_universe_home_task.query_params import DayToHireStatisticsQueryParams
 from hrf_universe_home_task.response_documentation import DAYS_TO_HIRE_STATISTICS
 
 
-router = APIRouter()
+router = APIRouter(prefix="/stats")
 
 
 logger = logging.getLogger()
@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 
 
 @router.get(
-    "/stats",
+    "/days_to_hire",
     description='Return "days to hire" statistics.',
     tags=[
         "Statistic",

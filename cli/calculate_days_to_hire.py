@@ -41,92 +41,109 @@ class CalculateDaysToHireJob:
             sql.Identifier(table_name),
         )
 
-    def _get_sql_to_processing_days_to_hire_calculation(
-        self,
-        table_name: str,
-        job_posting_table_name: str = "job_posting",
-        job_posting_min: int = 5,
-    ) -> sql.SQL:
-        _sql = sql.SQL(
+    @staticmethod
+    def _build_base_data_table(job_posting_table_name: str) -> sql.SQL:
+        return sql.SQL(
             """
-            WITH 
-                base_data AS (
+             base_data AS (
                     SELECT
                         standard_job_id,
                         country_code,
                         days_to_hire
                     FROM {}
                     WHERE days_to_hire IS NOT NULL
-                ),
-                percentiles AS (
-                    SELECT
-                        standard_job_id,
-                        country_code,
-                        PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY days_to_hire) AS p10,
-                        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY days_to_hire) AS p90
-                    FROM base_data
-                    GROUP BY standard_job_id, country_code
-                ),
-                filtered AS (
-                    SELECT
-                        b.standard_job_id,
-                        b.country_code,
-                        b.days_to_hire,
-                        p.p10,
-                        p.p90
-                    FROM base_data b
-                    JOIN percentiles p ON
-                        b.standard_job_id = p.standard_job_id 
-                    WHERE b.days_to_hire > p.p10 AND b.days_to_hire < p.p90 AND b.country_code is not Null
-                ),
-                aggregated_country AS (
-                    SELECT
-                        standard_job_id,
-                        country_code,
-                        COUNT(*) AS job_postings_number,
-                        AVG(days_to_hire)::INT AS avg_days,
-                        min(p10) as min_days,
-                        max(p90) as max_days
-                    FROM filtered
-                    GROUP BY standard_job_id, country_code
-
-                ),
-                world_percentiles AS (
-                    SELECT
-                        standard_job_id,
-                        PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY days_to_hire) AS p10,
-                        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY days_to_hire) AS p90
-                    FROM base_data
-                    GROUP BY standard_job_id
-                ),
-                filtered_world AS (
-                    SELECT
-                        b.standard_job_id,
-                        b.days_to_hire,
-                        p.p10,
-                        p.p90
-                    FROM base_data b
-                    JOIN world_percentiles p ON b.standard_job_id = p.standard_job_id
-                    WHERE b.days_to_hire > p.p10 AND b.days_to_hire < p.p90
-                ),
-                aggregated_world AS (
-                    SELECT
-                        standard_job_id,
-                        NULL AS country_code,
-                        COUNT(*) AS job_postings_number,
-                        AVG(days_to_hire)::INT AS avg_days,
-                        min(p10) as min_days,
-                        max(p90) as max_days
-                    FROM filtered_world
-                    GROUP BY standard_job_id
-
-                ),
-                final_result AS (
-                    SELECT * FROM aggregated_country
-                    UNION ALL
-                    SELECT * FROM aggregated_world
                 )
-                INSERT INTO {} (
+            """
+        ).format(sql.Identifier(job_posting_table_name))
+
+    @staticmethod
+    def _build_sql_statistic(
+        dimensions: list[str] = ["standard_job_id"],
+        additional_filters_before_aggregation: str = None,
+    ) -> tuple[sql.SQL, str]:
+
+        if additional_filters_before_aggregation is None:
+            additional_filters_before_aggregation = sql.SQL("")
+        else:
+            additional_filters_before_aggregation = sql.SQL(
+                additional_filters_before_aggregation
+            )
+
+        _group_by = sql.SQL(",".join(dimensions))
+        percentiles_table_name = sql.SQL(f'percentiles_{"_".join(dimensions)}')
+        filtered_table_name = sql.SQL(f'filtered_{"_".join(dimensions)}')
+        aggregated_table_name = sql.SQL(f'aggregated_{"_".join(dimensions)}')
+        _sql = sql.SQL(
+            """
+            {} AS (
+                SELECT
+                    standard_job_id,
+                    PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY days_to_hire) AS p10,
+                    PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY days_to_hire) AS p90
+                FROM base_data
+                GROUP BY {}
+            ),
+            {} AS (
+                SELECT
+                    b.standard_job_id,
+                    b.country_code,
+                    b.days_to_hire,
+                    p.p10 as min_days,
+                    p.p90 as max_days
+                FROM base_data b
+                JOIN {} p ON b.standard_job_id = p.standard_job_id
+                WHERE b.days_to_hire > p.p10 AND b.days_to_hire < p.p90 {}
+            ),
+            {} AS (
+                SELECT
+                    {},
+                    COUNT(*) AS job_postings_number,
+                    AVG(days_to_hire)::INT AS avg_days,
+                    min(min_days) as min_days,
+                    max(max_days) as max_days
+                FROM {}
+                GROUP BY {}
+            )
+        """
+        ).format(
+            percentiles_table_name,
+            _group_by,
+            filtered_table_name,
+            percentiles_table_name,
+            additional_filters_before_aggregation,
+            aggregated_table_name,
+            _group_by,
+            filtered_table_name,
+            _group_by,
+        )
+        return _sql, aggregated_table_name
+
+    @staticmethod
+    def _build_final_result_union_table(
+        country_aggregated_table_name: str, world_aggregated_table_name: str
+    ) -> sql.SQL:
+        return sql.SQL(
+            """
+             final_result AS (
+                    SELECT 
+                        standard_job_id, country_code, job_postings_number, avg_days, min_days, max_days 
+                    FROM {}
+                    UNION ALL
+                    SELECT 
+                        standard_job_id, NULL as country_code, job_postings_number, avg_days, min_days, max_days 
+                    FROM {}
+                )
+            """
+        ).format(
+            country_aggregated_table_name,
+            world_aggregated_table_name,
+        )
+
+    @staticmethod
+    def _build_inserting_sql(table_name: str, job_posting_min: int) -> sql.SQL:
+        return sql.SQL(
+            """
+            INSERT INTO {} (
                     id,
                     standard_job_id,
                     country_code,
@@ -147,9 +164,39 @@ class CalculateDaysToHireJob:
                 WHERE job_postings_number > {};
             """
         ).format(
-            sql.Identifier(job_posting_table_name),
-            sql.Identifier(self.__get_temp_table_name(table_name)),
+            sql.Identifier(table_name),
             sql.Literal(job_posting_min),
+        )
+
+    def _get_sql_to_processing_days_to_hire_calculation(
+        self,
+        table_name: str,
+        job_posting_table_name: str = "job_posting",
+        job_posting_min: int = 5,
+    ) -> sql.SQL:
+
+        base_data_sql = self._build_base_data_table(job_posting_table_name)
+        world_sql, world_aggregated_table_name = self._build_sql_statistic()
+        country_sql, country_aggregated_table_name = self._build_sql_statistic(
+            ["standard_job_id", "country_code"], "AND b.country_code is not Null"
+        )
+        final_result_union_sql = self._build_final_result_union_table(
+            country_aggregated_table_name, world_aggregated_table_name
+        )
+        inserting_sql = self._build_inserting_sql(
+            self.__get_temp_table_name(table_name), job_posting_min
+        )
+        _sql = sql.SQL(
+            """
+            WITH 
+                {},
+                {},
+                {},
+                {}
+                {}
+            """
+        ).format(
+            base_data_sql, country_sql, world_sql, final_result_union_sql, inserting_sql
         )
         return _sql
 
@@ -224,15 +271,52 @@ def parse_args():
         help="Minimum number of job postings required for a row to be saved in the output. (default: 5)",
     )
 
+    parser.add_argument(
+        "--rds_db_name",
+        type=str,
+        default="home_task",
+        help="Database name",
+    )
+
+    parser.add_argument(
+        "--rds_db_username",
+        type=str,
+        default="admin",
+        help="Username database",
+    )
+
+    parser.add_argument(
+        "--rds_db_password",
+        type=str,
+        default="adm1n_password",
+        help="Database password",
+    )
+
+    parser.add_argument(
+        "--rds_host",
+        type=str,
+        default="localhost",
+        help="Database host",
+    )
+
+    parser.add_argument(
+        "--rds_port",
+        type=str,
+        default="5432",
+        help="Database port",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
 
-    # for simplification credentials was been hardcoded
     CalculateDaysToHireJob(
-        "home_task", "admin", "adm1n_password", "localhost", "5432"
+        args.rds_db_name,
+        args.rds_db_username,
+        args.rds_db_password,
+        args.rds_host,
+        args.rds_port,
     ).run(
         args.save_to_table_name,
         args.job_posting_table_name,
